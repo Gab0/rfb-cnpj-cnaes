@@ -2,25 +2,29 @@
 
 use std::error::Error;
 use std::str;
-use std::fs::File;
+use std::fs::{File, create_dir_all};
 use std::io::Read;
 
-use std::time::{Duration, Instant};
+use std::env;
+
+use std::time::{Instant};
 use num_traits::cast::*;
 
 use titlecase::titlecase;
 
-use serde::{Serialize, Serializer};
+use serde::{Serialize};
 
-// Equivalente à série "Estabelecimentos";
+
+// Equivalente a série "Estabelecimentos";
 // Mas com alguns campos adicionais;
 #[derive(Debug, Serialize, Clone)]
 struct CNPJ {
     cnpj: String,
     cnpj_n: i32,
+    email: String,
+    nome: Option<String>,
     nome_fantasia: String,
     razao_social: Option<String>,
-    email: String,
     cnaes: String,
     data_abertura: String,
     municipio: String,
@@ -38,7 +42,6 @@ struct Empresa {
     cnpj_n: i32,
     nome: String
 }
-
 
 macro_rules! read_list {
     ($name:ident, $fname:expr, $fn:expr) => {
@@ -61,7 +64,7 @@ macro_rules! check_aux_list {
         for s in $idx..$vector.len() {
             if $result.cnpj_n == $vector[s].cnpj_n {
                 $idx = s;
-                $result.$field = Some($vector[s].nome.clone());
+                $result.$field = Some(titlecase(&$vector[s].nome));
                 break;
             }
 
@@ -72,9 +75,6 @@ macro_rules! check_aux_list {
         }
     }
 }
-
-
-
 
 // type CNAEs = Vec<String>;
 
@@ -93,7 +93,7 @@ fn read_telefone(record: &csv::ByteRecord, i: usize) -> Result<String, Box<dyn E
     let a = read_field(record, i)?;
     let b = read_field(record, i + 1)?;
 
-    if b == "" {
+    if b.is_empty() {
         Ok(b)
     } else {
         Ok(format!("({}) {}", a ,b))
@@ -112,11 +112,13 @@ fn read_cnaes(record: &csv::ByteRecord) -> Result<String, Box<dyn Error>> {
 
     Ok(cnaes.join(","))
 }
+
 fn read_record(record: &csv::ByteRecord) -> Result<CNPJ, Box<dyn Error>> {
   Ok(
       CNPJ {
           cnpj: format!("{}{}{}", read_field(&record, 0)?, read_field(&record, 1)?, read_field(&record, 2)?),
           cnpj_n: read_field(&record, 0)?.parse::<i32>().unwrap(),
+          nome: None,
           nome_fantasia: titlecase(&read_field(&record, 4)?),
           email: read_field(&record, 27)?.to_lowercase(),
           cnaes: read_cnaes(&record)?,
@@ -129,7 +131,7 @@ fn read_record(record: &csv::ByteRecord) -> Result<CNPJ, Box<dyn Error>> {
       })
 }
 
-fn read_from_file(path: &str, cnaes: Vec<String>) -> Result<Vec<CNPJ>, Box<dyn Error>> {
+fn read_from_file(path: &str) -> Result<Vec<CNPJ>, Box<dyn Error>> {
     // Creates a new csv `Reader` from a file
     let mut reader = csv::ReaderBuilder::new().delimiter(b';').from_path(path)?;
 
@@ -150,7 +152,7 @@ fn read_from_file(path: &str, cnaes: Vec<String>) -> Result<Vec<CNPJ>, Box<dyn E
         let situationr = read_field(&record, 5)?;
         let email = &record[27];
 
-        if email != [] {
+        if !email.is_empty() {
 
             if situationr == "02" {
                 match read_record(&record) {
@@ -187,15 +189,19 @@ fn read_series(identifier: &str) -> Result<Vec<String>, Box<dyn Error>> {
 }
 
 // Load target CNAE list;
-fn load_cnaes() -> Result<Vec<String>, Box<dyn Error>> {
-    let mut file = File::open("../cnaes.txt")?;
+fn load_cnaes(identifier: String) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut file = File::open(
+        format!("../cnaes_{}.txt", identifier)
+    )?;
     let mut contents = String::new();
 
     file.read_to_string(&mut contents)?;
 
     let mut output = vec![];
     for line in contents.split("\n") {
-        let cnae: String = line.split(" ").next().ok_or("")?.to_string();
+        let cnae: String = line
+            .split(' ').next().ok_or("")?.to_string()
+            .split('\t').next().ok_or("")?.to_string();
 
         if !cnae.is_empty() {
             output.push(cnae);
@@ -223,7 +229,29 @@ fn load_email_blacklist() -> Vec<String> {
 
 }
 
-fn filter_records(records: Vec<CNPJ>, email_blacklist: Vec<String>, cnaes: Vec<String>) -> Vec<CNPJ> {
+
+fn filter_cnaes(records: Vec<CNPJ>, cnaes: Vec<String>) -> Vec<CNPJ> {
+
+    let mut output: Vec<CNPJ> = vec![];
+
+    for record in records.iter() {
+        // CNAEs filtering;
+        let mut accepted = false;
+        for cnae in record.cnaes.split(",").map(str::to_string) {
+            if cnaes.contains(&cnae) {
+                accepted = true;
+                break;
+            }
+        }
+
+        if accepted {
+            output.push(record.clone());
+        }
+    }
+    output
+}
+
+fn filter_records(records: Vec<CNPJ>, email_blacklist: Vec<String>) -> Vec<CNPJ> {
 
     let mut output: Vec<CNPJ> = vec![];
 
@@ -235,16 +263,6 @@ fn filter_records(records: Vec<CNPJ>, email_blacklist: Vec<String>, cnaes: Vec<S
             if record.email.contains(antipattern) {
                 accepted = false;
                 // println!("Reject: {:?}", record.email);
-                break;
-            }
-        }
-        if !accepted { continue; }
-
-        // CNAEs filtering;
-        accepted = false;
-        for cnae in record.cnaes.split(",").map(str::to_string) {
-            if cnaes.contains(&cnae) {
-                accepted = true;
                 break;
             }
         }
@@ -269,7 +287,7 @@ fn filter_unique_email(records: Vec<CNPJ>) -> Vec<CNPJ> {
     output
 }
 
-fn write_output(records: Vec<CNPJ>) -> Result<(), Box<dyn Error>> {
+fn write_output(identifier: String, records: Vec<CNPJ>) -> Result<(), Box<dyn Error>> {
 
     let n = 50000;
     let mut outputs: Vec<Vec<CNPJ>> = vec![];
@@ -291,7 +309,10 @@ fn write_output(records: Vec<CNPJ>) -> Result<(), Box<dyn Error>> {
 
     println!("{}", outputs.len());
     for o in 0..outputs.len() {
-        let mut wtr = csv::Writer::from_path(format!("../output/output{}.csv", o + 1))?;
+
+        let output_path: String = format!("../output_{}", identifier);
+        create_dir_all(output_path.clone())?;
+        let mut wtr = csv::Writer::from_path(format!("{}/output{}.csv", output_path, o + 1))?;
         for record in &outputs[o] {
             match wtr.serialize(record) {
                 Ok(_) => wtr.flush()?,
@@ -308,7 +329,7 @@ fn read_socio(record: Result<csv::ByteRecord, csv::Error>) -> Result<Socio, Box<
     Ok(
         Socio {
             cnpj_n: read_field(&res, 0)?.parse::<i32>().unwrap(),
-            nome: titlecase(&read_field(&res, 2)?)
+            nome: read_field(&res, 2)?
         })
 }
 
@@ -317,7 +338,7 @@ fn read_empresa(record: Result<csv::ByteRecord, csv::Error>) -> Result<Empresa, 
     Ok(
         Empresa {
             cnpj_n: read_field(&res, 0)?.parse::<i32>().unwrap(),
-            nome: titlecase(&read_field(&res, 1)?)
+            nome: read_field(&res, 1)?
         })
 }
 
@@ -359,12 +380,43 @@ fn enhance_with_extra_data(mut records: Vec<CNPJ>) -> Vec<CNPJ> {
     output
 }
 
+fn determine_best_name(records: Vec<CNPJ>) -> Vec<CNPJ> {
+
+    let mut output = vec![];
+
+    for mut record in records {
+        if record.socio != None {
+            record.nome = record.socio.clone();
+        } else {
+
+        record.nome = Some(match &record.razao_social {
+
+            Some(nome) => cleanse_name(nome.clone()),
+            None => cleanse_name(record.nome_fantasia.clone())
+
+        });
+        }
+        output.push(record.clone());
+    }
+
+    output
+}
+
+fn cleanse_name(original: String) -> String {
+    original.chars().filter(|c| c.is_alphabetic() || c == &' ').collect::<String>().trim().to_string()
+}
+
+
 fn main() {
+
+    let identifier: String = env::args().nth(1).expect("No argument provided.");
 
     let now = Instant::now();
 
+    println!("> {}", identifier);
+
     // 0. Carregar configurações;
-    let cnaes = load_cnaes().ok().unwrap();
+    let cnaes = load_cnaes(identifier.clone()).expect("Cannot find CNAEs file.");
     let email_blacklist = load_email_blacklist();
 
     println!("{:?}", cnaes);
@@ -384,10 +436,10 @@ fn main() {
     for file in file_series {
         println!("Running for {:?}", file);
 
-        match read_from_file(&file, cnaes.clone()) {
+        match read_from_file(&file) {
             Ok(k) => {
                 println!("{} seconds elapsed on primary filter.", now.elapsed().as_secs());
-                let mut res1 = filter_records(k, email_blacklist.clone(), cnaes.clone());
+                let mut res1 = filter_records(k, email_blacklist.clone());
 
                 println!("{:?}", res1.len());
                 results.append(&mut res1);
@@ -398,6 +450,13 @@ fn main() {
             Err(e) => eprintln!("{}", e)
         }
     }
+
+    let w = results.len();
+    results = filter_cnaes(results, cnaes);
+
+    let j = results.len();
+    println!("Length before and after CNAEs filtering:");
+    show_number_of_records(j, w);
 
     println!("{} seconds elapsed before sorting.", now.elapsed().as_secs());
 
@@ -416,8 +475,11 @@ fn main() {
     // 4. Ordenar CNPJs por data (mais recentes primeiro);
     results.sort_by(|a, b| b.data_abertura.cmp(&a.data_abertura));
 
+    // 5. Criar coluna de melhor nome;
+    results = determine_best_name(results);
+
     // 5. Escrever saída;
-    write_output(results).unwrap();
+    write_output(identifier, results).unwrap();
 
     println!("{} seconds elapsed!", now.elapsed().as_secs());
 
