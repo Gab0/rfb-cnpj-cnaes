@@ -39,9 +39,12 @@ def download_data():
             URL = base_url + filename
             local_filename = os.path.join(DATASET_DIR, URL.split('/')[-1])
             if not os.path.isfile(local_filename):
+                print(f"Downloading {local_filename}...")
                 download_file(URL, local_filename)
 
             with zipfile.ZipFile(local_filename, 'r') as zip_ref:
+
+                print(f"Unzipping {local_filename}...")
                 for info in zip_ref.infolist():
                     extracted_path = zip_ref.extract(info, path=DATASET_DIR)
                     os.rename(
